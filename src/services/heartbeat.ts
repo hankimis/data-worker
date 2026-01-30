@@ -5,10 +5,21 @@ import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('heartbeat');
 
+export interface CollectionStats {
+  totalProfiles: number;
+  collectedProfiles: number;
+  collectingProfiles: number;
+  uncollectedProfiles: number;
+  uncollectableProfiles: number;
+  isCollectionPaused: boolean;
+  lastCollectionAt: string | null;
+  nextCollectionAt: string | null;
+}
+
 export interface WorkerStatus {
   workerId: string;
   workerName: string;
-  status: 'online' | 'busy' | 'idle';
+  status: 'online' | 'busy' | 'idle' | 'paused';
   version: string;
   startedAt: string;
   system: {
@@ -29,6 +40,7 @@ export interface WorkerStatus {
     completedJobs: number;
     failedJobs: number;
   };
+  collection: CollectionStats;
   lastJobAt: string | null;
 }
 
@@ -40,6 +52,18 @@ let activeJobs = 0;
 let waitingJobs = 0;
 let lastJobAt: string | null = null;
 let heartbeatInterval: NodeJS.Timeout | null = null;
+
+// Collection state
+let collectionStats: CollectionStats = {
+  totalProfiles: 0,
+  collectedProfiles: 0,
+  collectingProfiles: 0,
+  uncollectedProfiles: 0,
+  uncollectableProfiles: 0,
+  isCollectionPaused: false,
+  lastCollectionAt: null,
+  nextCollectionAt: null,
+};
 
 /**
  * Update job counters
@@ -59,6 +83,34 @@ export function updateJobStats(stats: {
 }
 
 /**
+ * Update collection stats
+ */
+export function updateCollectionStats(stats: Partial<CollectionStats>): void {
+  collectionStats = { ...collectionStats, ...stats };
+}
+
+/**
+ * Get collection stats
+ */
+export function getCollectionStats(): CollectionStats {
+  return { ...collectionStats };
+}
+
+/**
+ * Check if collection is paused
+ */
+export function isCollectionPaused(): boolean {
+  return collectionStats.isCollectionPaused;
+}
+
+/**
+ * Set collection paused state
+ */
+export function setCollectionPaused(paused: boolean): void {
+  collectionStats.isCollectionPaused = paused;
+}
+
+/**
  * Get current worker status
  */
 export function getWorkerStatus(): WorkerStatus {
@@ -66,7 +118,6 @@ export function getWorkerStatus(): WorkerStatus {
   const freeMem = os.freemem();
   const usedMem = totalMem - freeMem;
 
-  // Get CPU usage (simple approximation using load average on Unix, or 0 on Windows)
   const cpus = os.cpus();
   const cpuUsage = cpus.reduce((acc, cpu) => {
     const total = Object.values(cpu.times).reduce((a, b) => a + b, 0);
@@ -74,10 +125,17 @@ export function getWorkerStatus(): WorkerStatus {
     return acc + ((total - idle) / total) * 100;
   }, 0) / cpus.length;
 
+  let status: WorkerStatus['status'] = 'idle';
+  if (collectionStats.isCollectionPaused) {
+    status = 'paused';
+  } else if (activeJobs > 0) {
+    status = 'busy';
+  }
+
   return {
     workerId: config.worker.id,
     workerName: config.worker.name,
-    status: activeJobs > 0 ? 'busy' : 'idle',
+    status,
     version: '1.0.0',
     startedAt,
     system: {
@@ -98,6 +156,7 @@ export function getWorkerStatus(): WorkerStatus {
       completedJobs,
       failedJobs,
     },
+    collection: collectionStats,
     lastJobAt,
   };
 }
@@ -127,6 +186,13 @@ export async function sendHeartbeat(): Promise<boolean> {
     );
 
     if (response.status === 200) {
+      // Check for commands from server
+      const data = response.data;
+      if (data.command) {
+        logger.info({ command: data.command }, 'Received command from server');
+        handleServerCommand(data.command);
+      }
+
       logger.debug({ workerId: status.workerId }, 'Heartbeat sent successfully');
       return true;
     }
@@ -143,6 +209,28 @@ export async function sendHeartbeat(): Promise<boolean> {
       logger.warn({ error }, 'Failed to send heartbeat');
     }
     return false;
+  }
+}
+
+/**
+ * Handle command from server
+ */
+function handleServerCommand(command: string): void {
+  switch (command) {
+    case 'pause':
+      setCollectionPaused(true);
+      logger.info('Collection paused by server command');
+      break;
+    case 'resume':
+      setCollectionPaused(false);
+      logger.info('Collection resumed by server command');
+      break;
+    case 'trigger':
+      // Will be handled by scheduler
+      logger.info('Manual collection trigger received');
+      break;
+    default:
+      logger.warn({ command }, 'Unknown command received');
   }
 }
 

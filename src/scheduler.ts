@@ -1,5 +1,6 @@
 import { getCollectionQueue, CollectionJobData } from './queue/processor.js';
 import { getGoogleSheetsService, DEFAULT_SPREADSHEET_ID, DEFAULT_SHEET_NAME } from './services/google-sheets.js';
+import { updateCollectionStats, isCollectionPaused, setCollectionPaused } from './services/heartbeat.js';
 import { config } from './config/index.js';
 import { createChildLogger } from './utils/logger.js';
 
@@ -23,16 +24,53 @@ const IOV_SHEET_CONFIG: IOVSheetConfig = {
   itemsPerProfile: 10,
 };
 
-let iovSheetInterval: NodeJS.Timeout | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let iovSheetInterval: any = null;
 let isCollecting = false;
+let nextCollectionTime: Date | null = null;
+
+/**
+ * 시트 통계 업데이트
+ */
+async function updateSheetStats(): Promise<void> {
+  try {
+    const sheetsService = getGoogleSheetsService();
+    await sheetsService.initialize();
+
+    const profiles = await sheetsService.getProfiles(
+      IOV_SHEET_CONFIG.spreadsheetId,
+      IOV_SHEET_CONFIG.sheetName
+    );
+
+    const stats = {
+      totalProfiles: profiles.length,
+      collectedProfiles: profiles.filter((p) => p.isCollected).length,
+      collectingProfiles: profiles.filter((p) => p.isCollecting).length,
+      uncollectedProfiles: profiles.filter((p) => !p.isCollected && !p.isCollecting && !p.isUncollectable).length,
+      uncollectableProfiles: profiles.filter((p) => p.isUncollectable).length,
+      nextCollectionAt: nextCollectionTime?.toISOString() || null,
+    };
+
+    updateCollectionStats(stats);
+    logger.debug({ stats }, 'Updated collection stats');
+  } catch (error) {
+    logger.error({ error }, 'Failed to update sheet stats');
+  }
+}
 
 /**
  * IOV 시트에서 미수집 프로필 수집 시작
  */
-async function collectFromIOVSheet(): Promise<void> {
+async function collectFromIOVSheet(): Promise<{ success: boolean; message: string; count: number }> {
+  // 일시정지 상태 확인
+  if (isCollectionPaused()) {
+    logger.info('Collection is paused, skipping');
+    return { success: false, message: '수집이 일시정지 상태입니다.', count: 0 };
+  }
+
   if (isCollecting) {
     logger.info('Collection already in progress, skipping');
-    return;
+    return { success: false, message: '이미 수집이 진행 중입니다.', count: 0 };
   }
 
   isCollecting = true;
@@ -49,8 +87,9 @@ async function collectFromIOVSheet(): Promise<void> {
 
     if (uncollectedProfiles.length === 0) {
       logger.info('No uncollected profiles found');
+      await updateSheetStats();
       isCollecting = false;
-      return;
+      return { success: true, message: '수집할 프로필이 없습니다.', count: 0 };
     }
 
     logger.info({ count: uncollectedProfiles.length }, 'Found uncollected profiles');
@@ -68,14 +107,12 @@ async function collectFromIOVSheet(): Promise<void> {
     // 각 배치를 큐에 추가
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
-      const rows = batch.map((p) => p.row);
-      const usernames = batch.map((p) => p.username);
 
       // 수집중 상태 표시
       await sheetsService.markAsCollecting(
         IOV_SHEET_CONFIG.spreadsheetId,
         IOV_SHEET_CONFIG.sheetName,
-        rows
+        batch.map((p) => p.row)
       );
 
       // 플랫폼별로 그룹화
@@ -99,7 +136,7 @@ async function collectFromIOVSheet(): Promise<void> {
         await collectionQueue.add(`iov-instagram-batch-${batchIndex}`, jobData, {
           attempts: config.worker.maxRetries,
           backoff: { type: 'exponential', delay: 10000 },
-          delay: batchIndex * 60000, // 배치간 1분 간격
+          delay: batchIndex * 60000,
         });
 
         logger.info(
@@ -135,9 +172,22 @@ async function collectFromIOVSheet(): Promise<void> {
       }
     }
 
+    // 통계 업데이트
+    updateCollectionStats({
+      lastCollectionAt: new Date().toISOString(),
+    });
+    await updateSheetStats();
+
     logger.info({ totalBatches: batches.length }, 'All batches added to queue');
+
+    return {
+      success: true,
+      message: `${uncollectedProfiles.length}개 프로필 수집을 시작합니다.`,
+      count: uncollectedProfiles.length,
+    };
   } catch (error) {
     logger.error({ error }, 'Failed to collect from IOV sheet');
+    return { success: false, message: `수집 실패: ${error}`, count: 0 };
   } finally {
     isCollecting = false;
   }
@@ -156,44 +206,82 @@ export function startSheetsSyncScheduler(): void {
     'Starting IOV sheet collection scheduler'
   );
 
-  // 시작 후 1분 뒤에 첫 수집 실행 (서버 초기화 시간 확보)
+  // 초기 통계 업데이트
+  updateSheetStats();
+
+  // 다음 수집 시간 설정
+  nextCollectionTime = new Date(Date.now() + 60000);
+  updateCollectionStats({ nextCollectionAt: nextCollectionTime.toISOString() });
+
+  // 시작 후 1분 뒤에 첫 수집 실행
   setTimeout(() => {
     collectFromIOVSheet();
+    scheduleNextCollection();
   }, 60000);
-
-  // 주기적 수집
-  iovSheetInterval = setInterval(() => {
-    collectFromIOVSheet();
-  }, IOV_SHEET_CONFIG.intervalMs);
 
   logger.info('IOV sheet collection scheduler started');
 }
 
 /**
- * 수동으로 수집 트리거 (관리자 API용)
+ * 다음 수집 스케줄
  */
-export async function triggerManualCollection(): Promise<{ message: string; count: number }> {
-  if (isCollecting) {
-    return { message: '이미 수집이 진행 중입니다.', count: 0 };
+function scheduleNextCollection(): void {
+  if (iovSheetInterval) {
+    clearInterval(iovSheetInterval);
   }
 
-  await collectFromIOVSheet();
+  nextCollectionTime = new Date(Date.now() + IOV_SHEET_CONFIG.intervalMs);
+  updateCollectionStats({ nextCollectionAt: nextCollectionTime.toISOString() });
 
-  const sheetsService = getGoogleSheetsService();
-  const profiles = await sheetsService.getProfiles(
-    IOV_SHEET_CONFIG.spreadsheetId,
-    IOV_SHEET_CONFIG.sheetName
-  );
-  const collectingCount = profiles.filter((p) => p.isCollecting).length;
-
-  return { message: '수집이 시작되었습니다.', count: collectingCount };
+  iovSheetInterval = setInterval(() => {
+    collectFromIOVSheet();
+    nextCollectionTime = new Date(Date.now() + IOV_SHEET_CONFIG.intervalMs);
+    updateCollectionStats({ nextCollectionAt: nextCollectionTime.toISOString() });
+  }, IOV_SHEET_CONFIG.intervalMs);
 }
 
 /**
- * DB 폴링 스케줄러 (기존 collection_jobs 테이블 사용 시)
+ * 수동으로 수집 트리거
+ */
+export async function triggerManualCollection(): Promise<{ success: boolean; message: string; count: number }> {
+  return await collectFromIOVSheet();
+}
+
+/**
+ * 수집 일시정지
+ */
+export function pauseCollection(): void {
+  setCollectionPaused(true);
+  logger.info('Collection paused');
+}
+
+/**
+ * 수집 재개
+ */
+export function resumeCollection(): void {
+  setCollectionPaused(false);
+  logger.info('Collection resumed');
+}
+
+/**
+ * 현재 수집 상태 조회
+ */
+export function getCollectionStatus(): {
+  isPaused: boolean;
+  isCollecting: boolean;
+  nextCollectionAt: string | null;
+} {
+  return {
+    isPaused: isCollectionPaused(),
+    isCollecting,
+    nextCollectionAt: nextCollectionTime?.toISOString() || null,
+  };
+}
+
+/**
+ * DB 폴링 스케줄러 (비활성화)
  */
 export function startDatabasePollScheduler(): void {
-  // IOV 시트 수집을 주로 사용하므로 DB 폴링은 비활성화
   logger.info('Database poll scheduler disabled (using IOV sheet collection)');
 }
 
