@@ -13,11 +13,13 @@ import {
   startSheetsSyncScheduler,
   startDatabasePollScheduler,
   stopSchedulers,
+  triggerManualCollection,
 } from './scheduler.js';
 import {
   startHeartbeat,
   stopHeartbeat,
   sendOfflineNotification,
+  registerTriggerCallback,
 } from './services/heartbeat.js';
 
 let isShuttingDown = false;
@@ -89,6 +91,11 @@ async function main(): Promise<void> {
     // Start schedulers
     startSheetsSyncScheduler();
     startDatabasePollScheduler();
+
+    // Register trigger callback for remote commands
+    registerTriggerCallback(async () => {
+      await triggerManualCollection();
+    });
 
     // Start heartbeat to main SaaS server
     startHeartbeat();

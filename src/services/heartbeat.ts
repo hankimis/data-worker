@@ -53,6 +53,16 @@ let waitingJobs = 0;
 let lastJobAt: string | null = null;
 let heartbeatInterval: NodeJS.Timeout | null = null;
 
+// Trigger callback (to avoid circular dependency with scheduler)
+let triggerCallback: (() => Promise<void>) | null = null;
+
+/**
+ * Register trigger callback for manual collection
+ */
+export function registerTriggerCallback(callback: () => Promise<void>): void {
+  triggerCallback = callback;
+}
+
 // Collection state
 let collectionStats: CollectionStats = {
   totalProfiles: 0,
@@ -226,8 +236,12 @@ function handleServerCommand(command: string): void {
       logger.info('Collection resumed by server command');
       break;
     case 'trigger':
-      // Will be handled by scheduler
       logger.info('Manual collection trigger received');
+      if (triggerCallback) {
+        triggerCallback().catch((err) => {
+          logger.error({ error: err }, 'Failed to execute trigger callback');
+        });
+      }
       break;
     default:
       logger.warn({ command }, 'Unknown command received');
