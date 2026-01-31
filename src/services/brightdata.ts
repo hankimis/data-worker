@@ -112,19 +112,76 @@ export class BrightDataService {
   }
 
   /**
+   * Normalize BrightData raw response to our expected format
+   * Instagram API returns different field names than our interface
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private normalizeResult(raw: any): BrightDataResult {
+    // Log raw data for first few items to debug
+    logger.debug({ rawKeys: Object.keys(raw || {}).slice(0, 20) }, 'Raw result keys');
+
+    // Instagram field mapping (BrightData uses different names)
+    const result: BrightDataResult = {
+      id: raw.id || raw.pk || raw.shortcode || '',
+      url: raw.url || raw.post_url || raw.link || '',
+      timestamp: new Date().toISOString(),
+      author: raw.owner || raw.author ? {
+        id: raw.owner?.id || raw.owner?.pk || raw.author?.id || '',
+        name: raw.owner?.full_name || raw.owner?.name || raw.author?.name || '',
+        username: raw.owner?.username || raw.author?.username || '',
+        profile_url: raw.owner?.profile_url || '',
+        profile_pic_url: raw.owner?.profile_pic_url || raw.owner?.profile_pic_url_hd || raw.author?.profile_pic_url || '',
+        followers_count: raw.owner?.follower_count || raw.owner?.followers_count || 0,
+        following_count: raw.owner?.following_count || 0,
+      } : undefined,
+      content: {
+        type: raw.media_type || raw.type || 'post',
+        caption: raw.caption || raw.description || raw.text || '',
+        thumbnail_url: raw.display_url || raw.thumbnail_url || raw.image_url || '',
+        video_url: raw.video_url || raw.video_versions?.[0]?.url || '',
+      },
+      metrics: {
+        views: raw.play_count || raw.video_play_count || raw.view_count || raw.views || 0,
+        likes: raw.like_count || raw.likes || raw.likes_count || 0,
+        comments: raw.comment_count || raw.comments || raw.comments_count || 0,
+        shares: raw.share_count || raw.shares || 0,
+      },
+      posted_at: raw.taken_at_timestamp
+        ? new Date(raw.taken_at_timestamp * 1000).toISOString()
+        : raw.taken_at || raw.posted_at || raw.timestamp || null,
+      raw,
+    };
+
+    return result;
+  }
+
+  /**
    * Download snapshot results when ready
    */
   async downloadSnapshot(snapshotId: string): Promise<BrightDataResult[]> {
     try {
       logger.info({ snapshotId }, 'Downloading snapshot results');
 
-      const response = await this.client.get<BrightDataResult[]>(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await this.client.get<any[]>(
         `/snapshot/${snapshotId}?format=json`
       );
 
-      logger.info({ snapshotId, resultCount: response.data.length }, 'Snapshot downloaded');
+      // Log sample of raw data for debugging
+      if (response.data.length > 0) {
+        logger.info({
+          sampleRawData: JSON.stringify(response.data[0]).substring(0, 1000),
+          totalResults: response.data.length,
+        }, 'Raw snapshot sample');
+      }
 
-      return response.data;
+      // Normalize all results
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const normalizedResults = response.data.map((raw: any) => this.normalizeResult(raw));
+
+      logger.info({ snapshotId, resultCount: normalizedResults.length }, 'Snapshot downloaded and normalized');
+
+      return normalizedResults;
     } catch (error) {
       logger.error({ error, snapshotId }, 'Failed to download snapshot');
       throw error;

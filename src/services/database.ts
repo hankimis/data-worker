@@ -71,6 +71,16 @@ export class DatabaseService {
       await client.query('BEGIN');
 
       for (const result of results) {
+        // Log raw result for debugging (first 3 items only)
+        if (inserted + updated < 3) {
+          logger.info({
+            rawResult: JSON.stringify(result).substring(0, 500),
+            hasAuthor: !!result.author,
+            hasMetrics: !!result.metrics,
+            hasContent: !!result.content,
+          }, 'BrightData result sample');
+        }
+
         const contentUrl = result.url;
 
         // Check if content exists
@@ -80,20 +90,17 @@ export class DatabaseService {
         );
 
         if (existing.rows.length > 0) {
-          // Update existing content metrics
+          // Update existing content metrics (correct column names)
           await client.query(
             `UPDATE contents SET
-              view_count = COALESCE($1, view_count),
-              like_count = COALESCE($2, like_count),
-              comment_count = COALESCE($3, comment_count),
-              share_count = COALESCE($4, share_count),
-              updated_at = NOW()
-            WHERE content_url = $5`,
+              view_count_collected = COALESCE($1, view_count_collected),
+              like_count_collected = COALESCE($2, like_count_collected),
+              comment_count_collected = COALESCE($3, comment_count_collected)
+            WHERE content_url = $4`,
             [
-              result.metrics?.views,
-              result.metrics?.likes,
-              result.metrics?.comments,
-              result.metrics?.shares,
+              result.metrics?.views ?? 0,
+              result.metrics?.likes ?? 0,
+              result.metrics?.comments ?? 0,
               contentUrl,
             ]
           );
@@ -104,28 +111,26 @@ export class DatabaseService {
             await this.linkContentToProject(client, existing.rows[0].id, projectId);
           }
         } else {
-          // Insert new content
+          // Insert new content (correct column names matching schema.ts)
           const insertResult = await client.query(
             `INSERT INTO contents (
-              platform, content_url, author_id, author_name,
+              platform, content_url, author_id,
               author_profile_url, thumbnail_url, video_url,
-              caption, view_count, like_count, comment_count,
-              share_count, uploaded_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+              caption, view_count_collected, like_count_collected, comment_count_collected,
+              uploaded_at, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
             RETURNING id`,
             [
               platform,
               contentUrl,
-              result.author?.username || result.author?.id,
-              result.author?.name,
+              result.author?.username || result.author?.id || 'unknown',
               result.author?.profile_pic_url,
               result.content?.thumbnail_url,
               result.content?.video_url,
               result.content?.caption,
-              result.metrics?.views,
-              result.metrics?.likes,
-              result.metrics?.comments,
-              result.metrics?.shares,
+              result.metrics?.views ?? 0,
+              result.metrics?.likes ?? 0,
+              result.metrics?.comments ?? 0,
               result.posted_at ? new Date(result.posted_at) : null,
             ]
           );
