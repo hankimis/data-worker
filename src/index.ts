@@ -88,8 +88,8 @@ async function main(): Promise<void> {
     // Start workers
     startWorkers();
 
-    // Start schedulers
-    startSheetsSyncScheduler();
+    // Start schedulers (await to ensure stats are loaded before heartbeat)
+    await startSheetsSyncScheduler();
     startDatabasePollScheduler();
 
     // Register trigger callback for remote commands

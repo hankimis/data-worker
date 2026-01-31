@@ -196,7 +196,7 @@ async function collectFromIOVSheet(): Promise<{ success: boolean; message: strin
 /**
  * IOV 시트 수집 스케줄러 시작
  */
-export function startSheetsSyncScheduler(): void {
+export async function startSheetsSyncScheduler(): Promise<void> {
   logger.info(
     {
       spreadsheetId: IOV_SHEET_CONFIG.spreadsheetId,
@@ -206,8 +206,8 @@ export function startSheetsSyncScheduler(): void {
     'Starting IOV sheet collection scheduler'
   );
 
-  // 초기 통계 업데이트
-  updateSheetStats();
+  // 초기 통계 업데이트 (await 추가 - heartbeat 전송 전에 stats 로드)
+  await updateSheetStats();
 
   // 다음 수집 시간 설정
   nextCollectionTime = new Date(Date.now() + 60000);
