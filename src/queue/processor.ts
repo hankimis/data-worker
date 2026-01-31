@@ -5,7 +5,7 @@ import { createChildLogger } from '../utils/logger.js';
 import { getBrightDataService, BrightDataInput } from '../services/brightdata.js';
 import { getDatabaseService } from '../services/database.js';
 import { getGoogleSheetsService } from '../services/google-sheets.js';
-import { updateJobStats } from '../services/heartbeat.js';
+import { updateJobStats, addActivity } from '../services/heartbeat.js';
 
 const logger = createChildLogger('queue-processor');
 
@@ -68,6 +68,15 @@ async function processCollectionJob(job: Job<CollectionJobData>): Promise<void> 
     'Processing collection job'
   );
 
+  // Activity 로그
+  addActivity('info', 'job', `수집 작업 시작: ${platform} ${type}`, {
+    jobId: job.id,
+    platform,
+    type,
+    targetCount: targets.length,
+    targets: targets.slice(0, 5), // 처음 5개만 표시
+  });
+
   const brightData = getBrightDataService();
   const database = getDatabaseService();
   const sheetsService = sheetInfo ? getGoogleSheetsService() : null;
@@ -96,6 +105,11 @@ async function processCollectionJob(job: Job<CollectionJobData>): Promise<void> 
     await job.updateProgress(10);
 
     logger.info({ snapshotId: snapshot.snapshot_id }, 'Collection triggered, waiting for results');
+    addActivity('info', 'api', `BrightData 수집 요청 완료`, {
+      snapshotId: snapshot.snapshot_id,
+      platform,
+      inputCount: inputs.length,
+    });
 
     // Wait for results
     const results = await brightData.waitForSnapshot(snapshot.snapshot_id, {
@@ -107,6 +121,12 @@ async function processCollectionJob(job: Job<CollectionJobData>): Promise<void> 
 
     // Store results in database
     const { inserted, updated } = await database.upsertContent(platform, results, projectId);
+    addActivity('success', 'collection', `콘텐츠 저장 완료: ${inserted}개 신규, ${updated}개 업데이트`, {
+      platform,
+      inserted,
+      updated,
+      total: results.length,
+    });
 
     await job.updateProgress(90);
 
@@ -164,6 +184,14 @@ async function processCollectionJob(job: Job<CollectionJobData>): Promise<void> 
       { jobId: job.id, inserted, updated, total: results.length },
       'Collection job completed'
     );
+    addActivity('success', 'job', `수집 작업 완료: ${platform} ${type}`, {
+      jobId: job.id,
+      platform,
+      type,
+      inserted,
+      updated,
+      total: results.length,
+    });
 
     // Update DB job status
     if (jobId) {
@@ -174,6 +202,12 @@ async function processCollectionJob(job: Job<CollectionJobData>): Promise<void> 
     updateJobStats({ active: 0, completed: 1, lastJobAt: new Date().toISOString() });
   } catch (error) {
     logger.error({ error, jobId: job.id }, 'Collection job failed');
+    addActivity('error', 'job', `수집 작업 실패: ${platform} ${type}`, {
+      jobId: job.id,
+      platform,
+      type,
+      error: String(error),
+    });
 
     // 실패 시 시트 상태 초기화
     if (sheetInfo && sheetsService) {

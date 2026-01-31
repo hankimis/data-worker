@@ -16,6 +16,15 @@ export interface CollectionStats {
   nextCollectionAt: string | null;
 }
 
+export interface ActivityEntry {
+  id: string;
+  timestamp: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+  category: 'job' | 'collection' | 'system' | 'api';
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 export interface WorkerStatus {
   workerId: string;
   workerName: string;
@@ -42,6 +51,7 @@ export interface WorkerStatus {
   };
   collection: CollectionStats;
   lastJobAt: string | null;
+  recentActivity: ActivityEntry[];
 }
 
 // Worker state
@@ -52,6 +62,11 @@ let activeJobs = 0;
 let waitingJobs = 0;
 let lastJobAt: string | null = null;
 let heartbeatInterval: NodeJS.Timeout | null = null;
+
+// Recent activity log (max 100 entries)
+const MAX_ACTIVITY_ENTRIES = 100;
+let recentActivity: ActivityEntry[] = [];
+let activityIdCounter = 0;
 
 // Trigger callback (to avoid circular dependency with scheduler)
 let triggerCallback: (() => Promise<void>) | null = null;
@@ -97,6 +112,41 @@ export function updateJobStats(stats: {
  */
 export function updateCollectionStats(stats: Partial<CollectionStats>): void {
   collectionStats = { ...collectionStats, ...stats };
+}
+
+/**
+ * Add activity entry to recent activity log
+ */
+export function addActivity(
+  type: ActivityEntry['type'],
+  category: ActivityEntry['category'],
+  message: string,
+  details?: Record<string, unknown>
+): void {
+  const entry: ActivityEntry = {
+    id: `act-${++activityIdCounter}`,
+    timestamp: new Date().toISOString(),
+    type,
+    category,
+    message,
+    details,
+  };
+
+  recentActivity.unshift(entry);
+
+  // Keep only the most recent entries
+  if (recentActivity.length > MAX_ACTIVITY_ENTRIES) {
+    recentActivity = recentActivity.slice(0, MAX_ACTIVITY_ENTRIES);
+  }
+
+  logger.debug({ activity: entry }, 'Activity logged');
+}
+
+/**
+ * Get recent activity entries
+ */
+export function getRecentActivity(limit = 50): ActivityEntry[] {
+  return recentActivity.slice(0, limit);
 }
 
 /**
@@ -168,6 +218,7 @@ export function getWorkerStatus(): WorkerStatus {
     },
     collection: collectionStats,
     lastJobAt,
+    recentActivity: getRecentActivity(50),
   };
 }
 

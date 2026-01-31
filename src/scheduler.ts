@@ -1,6 +1,6 @@
 import { getCollectionQueue, CollectionJobData } from './queue/processor.js';
 import { getGoogleSheetsService, DEFAULT_SPREADSHEET_ID, DEFAULT_SHEET_NAME } from './services/google-sheets.js';
-import { updateCollectionStats, isCollectionPaused, setCollectionPaused } from './services/heartbeat.js';
+import { updateCollectionStats, isCollectionPaused, setCollectionPaused, addActivity } from './services/heartbeat.js';
 import { config } from './config/index.js';
 import { createChildLogger } from './utils/logger.js';
 
@@ -15,12 +15,13 @@ interface IOVSheetConfig {
   itemsPerProfile: number;
 }
 
-// 기본 설정: 아이오브 시트, 1시간마다, 25명씩 배치
+// 기본 설정: 아이오브 시트, 1시간마다
+// TODO: 테스트 완료 후 batchSize를 25로 변경
 const IOV_SHEET_CONFIG: IOVSheetConfig = {
   spreadsheetId: DEFAULT_SPREADSHEET_ID,
   sheetName: DEFAULT_SHEET_NAME,
   intervalMs: 60 * 60 * 1000, // 1시간
-  batchSize: 25,
+  batchSize: 1, // 테스트용: 1개씩 수집
   itemsPerProfile: 10,
 };
 
@@ -93,6 +94,9 @@ async function collectFromIOVSheet(): Promise<{ success: boolean; message: strin
     }
 
     logger.info({ count: uncollectedProfiles.length }, 'Found uncollected profiles');
+    addActivity('info', 'collection', `미수집 프로필 ${uncollectedProfiles.length}개 발견`, {
+      count: uncollectedProfiles.length,
+    });
 
     // 배치로 분할
     const batches: typeof uncollectedProfiles[] = [];
@@ -179,6 +183,10 @@ async function collectFromIOVSheet(): Promise<{ success: boolean; message: strin
     await updateSheetStats();
 
     logger.info({ totalBatches: batches.length }, 'All batches added to queue');
+    addActivity('success', 'collection', `${batches.length}개 배치 큐에 추가 완료`, {
+      totalBatches: batches.length,
+      totalProfiles: uncollectedProfiles.length,
+    });
 
     return {
       success: true,
