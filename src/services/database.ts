@@ -90,17 +90,30 @@ export class DatabaseService {
         );
 
         if (existing.rows.length > 0) {
-          // Update existing content metrics (correct column names)
+          // Update existing content - fill missing fields and update metrics
+          // COALESCE with NULLIF handles empty strings: if current is '' or NULL, use new value
           await client.query(
             `UPDATE contents SET
-              view_count_collected = COALESCE($1, view_count_collected),
-              like_count_collected = COALESCE($2, like_count_collected),
-              comment_count_collected = COALESCE($3, comment_count_collected)
-            WHERE content_url = $4`,
+              author_id = COALESCE(NULLIF($1, ''), NULLIF(author_id, ''), author_id),
+              author_profile_url = COALESCE(NULLIF($2, ''), author_profile_url),
+              thumbnail_url = COALESCE(NULLIF($3, ''), thumbnail_url),
+              video_url = COALESCE(NULLIF($4, ''), video_url),
+              caption = COALESCE(NULLIF($5, ''), caption),
+              view_count_collected = GREATEST($6, view_count_collected),
+              like_count_collected = GREATEST($7, like_count_collected),
+              comment_count_collected = GREATEST($8, comment_count_collected),
+              uploaded_at = COALESCE($9, uploaded_at)
+            WHERE content_url = $10`,
             [
+              result.author?.username || result.author?.id || '',
+              result.author?.profile_pic_url || '',
+              result.content?.thumbnail_url || '',
+              result.content?.video_url || '',
+              result.content?.caption || '',
               result.metrics?.views ?? 0,
               result.metrics?.likes ?? 0,
               result.metrics?.comments ?? 0,
+              result.posted_at ? new Date(result.posted_at) : null,
               contentUrl,
             ]
           );
